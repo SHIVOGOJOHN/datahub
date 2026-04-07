@@ -389,7 +389,8 @@ def new_oauth_state(settings: Settings) -> str:
 
 
 def verify_oauth_state(settings: Settings, state: str, max_age_seconds: int = 600) -> bool:
-    parts = state.split(".")
+    normalized = urllib.parse.unquote((state or "").strip()).strip("\"'")
+    parts = normalized.split(".")
     if len(parts) != 3:
         return False
     nonce, ts_raw, sig = parts
@@ -399,7 +400,8 @@ def verify_oauth_state(settings: Settings, state: str, max_age_seconds: int = 60
         ts = int(ts_raw)
     except ValueError:
         return False
-    if int(time.time()) - ts > max_age_seconds:
+    age = int(time.time()) - ts
+    if age < 0 or age > max_age_seconds:
         return False
     expected = _sign_state(settings, f"{nonce}.{ts_raw}")
     return hmac.compare_digest(expected, sig)
@@ -591,7 +593,10 @@ def handle_google_callback(settings: Settings, store: MySQLStore | None) -> None
         state = state[0] if state else ""
     if isinstance(code, list):
         code = code[0] if code else ""
-    if not state or not verify_oauth_state(settings, state):
+    session_state_value = str(st.session_state.get("oauth_state_last") or "")
+    signed_ok = bool(state) and verify_oauth_state(settings, state, max_age_seconds=3600)
+    session_ok = bool(state) and state == session_state_value
+    if not (signed_ok or session_ok):
         st.query_params.clear()
         st.error("Google auth failed (invalid state).")
         return
@@ -668,7 +673,9 @@ def render_public_hub(store: MySQLStore | None, settings: Settings) -> None:
                 if is_allowed_admin(settings):
                     st.caption("Admin email recognized.")
             else:
-                sign_url = google_auth_url(settings, new_oauth_state(settings))
+                state_value = new_oauth_state(settings)
+                st.session_state["oauth_state_last"] = state_value
+                sign_url = google_auth_url(settings, state_value)
                 st.markdown(
                     f"""
                     <a class="google-btn" href="{sign_url}" target="_self" rel="noopener">
