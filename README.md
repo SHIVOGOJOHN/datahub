@@ -3,7 +3,7 @@
 Simple Streamlit resource hub for your TikTok data/AI audience:
 - Public beautiful frontend for resources (files + links)
 - Dedicated `Ask A Question` page for learner messages
-- Admin-only upload page (`john` / `jon6y.crae` by default)
+- Admin-only upload page 
 - Admin page visibility locked to allowlisted Google emails (`ADMIN_EMAILS`)
 - Google OAuth signup for email updates
 - MySQL storage for resources, Google signups, and user queries/messages
