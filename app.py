@@ -8,6 +8,7 @@ import logging
 import os
 import secrets
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -45,6 +46,36 @@ def _env_bool(key: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _secret_value(key: str) -> str | None:
+    try:
+        if key in st.secrets:
+            value = st.secrets[key]
+            if value is None:
+                return None
+            return str(value).strip()
+    except Exception:
+        return None
+    return None
+
+
+def _cfg(*keys: str, default: str = "") -> str:
+    for key in keys:
+        sec = _secret_value(key)
+        if sec:
+            return sec
+        env = os.getenv(key)
+        if env is not None and env.strip():
+            return env.strip()
+    return default
+
+
+def _cfg_bool(key: str, default: bool = False) -> bool:
+    sec = _secret_value(key)
+    if sec is not None:
+        return sec.lower() in {"1", "true", "yes", "on"}
+    return _env_bool(key, default=default)
+
+
 def _sanitize_text(raw: str) -> str:
     text = raw or ""
     secret_keys = [
@@ -78,30 +109,30 @@ def public_error(message: str) -> None:
 
 @dataclass(slots=True)
 class Settings:
-    app_name: str = os.getenv("APP_NAME", "Data Creator Hub")
-    app_session_secret: str = os.getenv("APP_SESSION_SECRET", "change-me")
-    admin_username: str = os.getenv("ADMIN_USERNAME", "john")
-    admin_password: str = os.getenv("ADMIN_PASSWORD", "jon6y.crae")
-    admin_emails: str = os.getenv("ADMIN_EMAILS", "")
+    app_name: str = _cfg("APP_NAME", default="Data Creator Hub")
+    app_session_secret: str = _cfg("APP_SESSION_SECRET", default="change-me")
+    admin_username: str = _cfg("ADMIN_USERNAME", default="john")
+    admin_password: str = _cfg("ADMIN_PASSWORD", default="jon6y.crae")
+    admin_emails: str = _cfg("ADMIN_EMAILS", default="")
 
-    mysql_host: str = _first_env("MYSQL_HOST", "DB_HOST", default="")
-    mysql_port: int = int(_first_env("MYSQL_PORT", "DB_PORT", default="3306"))
-    mysql_database: str = _first_env("MYSQL_DATABASE", "DB_NAME", "DB_DATABASE", default="")
-    mysql_user: str = _first_env("MYSQL_USER", "DB_USER", default="")
-    mysql_password: str = _first_env("MYSQL_PASSWORD", "DB_PASSWORD", default="")
-    mysql_ssl_ca: str = os.getenv("MYSQL_SSL_CA", "")
-    mysql_ssl_disabled: bool = _env_bool("MYSQL_SSL_DISABLED", default=False)
-    mysql_connect_timeout: int = int(os.getenv("MYSQL_CONNECT_TIMEOUT", "10"))
+    mysql_host: str = _cfg("MYSQL_HOST", "DB_HOST", default="")
+    mysql_port: int = int(_cfg("MYSQL_PORT", "DB_PORT", default="3306"))
+    mysql_database: str = _cfg("MYSQL_DATABASE", "DB_NAME", "DB_DATABASE", default="")
+    mysql_user: str = _cfg("MYSQL_USER", "DB_USER", default="")
+    mysql_password: str = _cfg("MYSQL_PASSWORD", "DB_PASSWORD", default="")
+    mysql_ssl_ca: str = _cfg("MYSQL_SSL_CA", default="")
+    mysql_ssl_disabled: bool = _cfg_bool("MYSQL_SSL_DISABLED", default=False)
+    mysql_connect_timeout: int = int(_cfg("MYSQL_CONNECT_TIMEOUT", default="10"))
 
-    google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "")
-    google_client_secret: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
-    google_redirect_uri: str = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8501")
+    google_client_id: str = _cfg("GOOGLE_CLIENT_ID", default="")
+    google_client_secret: str = _cfg("GOOGLE_CLIENT_SECRET", default="")
+    google_redirect_uri: str = _cfg("GOOGLE_REDIRECT_URI", default="http://localhost:8501")
 
-    use_github_upload: bool = os.getenv("USE_GITHUB_UPLOAD", "true").lower() in {"1", "true", "yes"}
-    github_token: str = os.getenv("GITHUB_TOKEN", "")
-    github_repo: str = os.getenv("GITHUB_REPO", "")
-    github_branch: str = os.getenv("GITHUB_BRANCH", "main")
-    github_upload_dir: str = os.getenv("GITHUB_UPLOAD_DIR", "resources")
+    use_github_upload: bool = _cfg_bool("USE_GITHUB_UPLOAD", default=True)
+    github_token: str = _cfg("GITHUB_TOKEN", default="")
+    github_repo: str = _cfg("GITHUB_REPO", default="")
+    github_branch: str = _cfg("GITHUB_BRANCH", default="main")
+    github_upload_dir: str = _cfg("GITHUB_UPLOAD_DIR", default="resources")
 
     @property
     def mysql_enabled(self) -> bool:
@@ -576,6 +607,26 @@ def handle_google_callback(settings: Settings, store: MySQLStore | None) -> None
         else:
             st.warning("Signed in with Google, but signup could not be saved because MySQL is unavailable.")
         st.rerun()
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            body = exc.read().decode("utf-8", errors="ignore")
+            payload = json.loads(body) if body else {}
+            detail = str(payload)
+        except Exception:
+            detail = str(exc)
+        lowered = detail.lower()
+        report_error("google_callback_http", exc)
+        if "redirect_uri_mismatch" in lowered:
+            public_error("Google sign-in configuration error: redirect URL does not match deployment settings.")
+        elif "invalid_client" in lowered:
+            public_error("Google sign-in configuration error: client credentials are invalid.")
+        elif "invalid_grant" in lowered:
+            public_error("Google sign-in session expired. Please click the Google sign-in button again.")
+        elif "access_denied" in lowered:
+            public_error("Google access denied. Ensure this account is allowed in your OAuth consent settings.")
+        else:
+            public_error("Google signup could not be completed right now. Please try again.")
     except Exception as exc:
         report_error("google_callback", exc)
         public_error("Google signup failed. Please try again.")
@@ -662,16 +713,15 @@ def render_public_hub(store: MySQLStore | None, settings: Settings) -> None:
             unsafe_allow_html=True,
         )
         c1, c2, c3 = st.columns(3)
+        resource_type = (item.get("resource_type") or "").lower()
         with c1:
-            if item.get("view_url"):
-                st.link_button("View", item["view_url"], use_container_width=True)
-            elif item.get("external_url"):
+            if resource_type == "link" and item.get("external_url"):
                 st.link_button("Open Link", item["external_url"], use_container_width=True)
         with c2:
-            if item.get("download_url"):
+            if resource_type == "file" and item.get("download_url"):
                 st.link_button("Download", item["download_url"], use_container_width=True)
-            elif item.get("external_url"):
-                st.link_button("Visit", item["external_url"], use_container_width=True)
+            elif resource_type == "link" and item.get("view_url"):
+                st.link_button("View", item["view_url"], use_container_width=True)
         with c3:
             st.markdown(f"<span class='small-note'>{fmt_size(item.get('file_size'))}</span>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
